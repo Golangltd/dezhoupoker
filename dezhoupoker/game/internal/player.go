@@ -1,0 +1,239 @@
+package internal
+
+import (
+	"dezhoupoker/game/internal/algorithm"
+	"dezhoupoker/msg"
+	"fmt"
+	"github.com/name5566/leaf/gate"
+	"github.com/name5566/leaf/log"
+	"time"
+)
+
+type GameStatus int32
+
+const (
+	emNotGaming GameStatus = 0 // 没有在游戏中
+	emInGaming  GameStatus = 1 // 正在游戏中
+)
+
+type Player struct {
+	// 玩家代理链接
+	ConnAgent gate.Agent
+
+	Id        string
+	NickName  string
+	HeadImg   string
+	Account   float64
+	Password  string
+	Token     string
+	RoundId   string
+	PackageId uint16
+
+	cards           algorithm.Cards  // 牌型数据
+	chips           float64          // 玩家筹码
+	roomChips       float64          // 玩家房间筹码
+	chair           int32            // 座位号(站起为-1)
+	standUPNum      int32            // 站起玩家局数(站起6局直接踢出)
+	actStatus       msg.ActionStatus // 玩家行动状态
+	gameStep        GameStatus       // 玩家游戏状态
+	downBets        float64          // 下注金额
+	lunDownBets     float64          // 每轮总下注
+	totalDownBet    float64          // 下注总金额
+	cardData        msg.CardSuitData // 卡牌数据和类型
+	resultMoney     float64          // 结算金额
+	resultGetMoney  float64          // 玩家结算多出的金额
+	WinResultMoney  float64          // 本局赢钱金额
+	LoseResultMoney float64          // 本局输钱金额
+	blindType       msg.BlindType    // 盲注类型
+	IsAllIn         bool             // 是否全压
+	IsButton        bool             // 是否庄家
+	IsWinner        bool             // 是否赢家
+	IsAction        bool             // 玩家是否行动过
+	IsOnline        bool             // 是否在线
+	actTime         int32            // 当前行动时间
+	IsTimeOutFold   bool             // 是否超时弃牌
+	IsInGame        bool             // 是否在游戏中
+	IsStandUp       bool             // 玩家是否站起
+	IsLeaveR        bool             // 判断客户端是否离开房间
+	timerCount      float64          // 玩家行动计时
+
+	LockMoney float64 // 下注锁定的钱
+
+	PreRoomId string // 记录上次房间id
+	HandValue uint32
+	action    chan msg.ActionStatus // 玩家行动命令
+
+	cfgId string // 房间等级
+
+	IsRobot   bool // 是否机器人
+	IsMaxCard bool // 是否最大牌型
+
+	LockChan chan bool // 是否锁钱成功
+}
+
+func (p *Player) Init() {
+	p.RoundId = fmt.Sprintf("%+v-%+v", time.Now().Unix(), p.Id)
+	p.chips = 0
+	p.roomChips = 0
+	p.chair = 0
+	p.standUPNum = 0
+	p.actStatus = msg.ActionStatus_WAITING
+	p.gameStep = emNotGaming
+	p.downBets = 0
+	p.lunDownBets = 0
+	p.totalDownBet = 0
+	p.cardData = msg.CardSuitData{}
+	p.resultMoney = 0
+	p.resultGetMoney = 0
+	p.WinResultMoney = 0
+	p.LoseResultMoney = 0
+	p.blindType = msg.BlindType_No_Blind
+	p.IsAllIn = false
+	p.IsButton = false
+	p.IsWinner = false
+	p.IsAction = false
+	p.HandValue = 0
+	p.IsOnline = true
+	p.IsTimeOutFold = false
+	p.timerCount = 0
+	p.IsInGame = false
+	p.IsStandUp = false
+	p.IsLeaveR = false
+	p.action = make(chan msg.ActionStatus)
+	p.LockMoney = 0
+	p.PreRoomId = ""
+	p.cfgId = ""
+	p.IsRobot = false
+	p.IsMaxCard = false
+	p.LockChan = make(chan bool)
+}
+
+//SendMsg 玩家向客户端发送消息
+func (p *Player) SendMsg(msg interface{}) {
+	if p.ConnAgent != nil {
+		p.ConnAgent.WriteMsg(msg)
+	}
+}
+
+//RespPlayerData 返回玩家数据
+func (p *Player) RespPlayerData() *msg.PlayerData {
+	data := &msg.PlayerData{}
+	data.PlayerInfo = new(msg.PlayerInfo)
+	data.PlayerInfo.Id = p.Id
+	data.PlayerInfo.NickName = p.NickName
+	data.PlayerInfo.HeadImg = p.HeadImg
+	data.PlayerInfo.Account = p.Account
+	data.Chair = p.chair
+	data.StandUPNum = p.standUPNum
+	data.Chips = p.chips
+	data.RoomChips = p.roomChips
+	data.ActionStatus = p.actStatus
+	data.GameStep = int32(p.gameStep)
+	data.DownBets = p.downBets
+	data.LunDownBets = p.lunDownBets
+	data.TotalDownBet = p.totalDownBet
+	data.CardSuitData = new(msg.CardSuitData)
+	data.CardSuitData.HandCardKeys = p.cardData.HandCardKeys
+	data.CardSuitData.PublicCardKeys = p.cardData.PublicCardKeys
+	data.CardSuitData.SuitPattern = p.cardData.SuitPattern
+	data.ResultMoney = p.resultMoney
+	data.ResultGetMoney = p.resultGetMoney
+	data.BlindType = p.blindType
+	data.IsButton = p.IsButton
+	data.IsAllIn = p.IsAllIn
+	data.IsWinner = p.IsWinner
+	data.IsInGame = p.IsInGame
+	data.TimerCount = p.timerCount
+	data.IsStandUp = p.IsStandUp
+	data.IsLeaveR = p.IsLeaveR
+	return data
+}
+
+func (p *Player) GetAction(r *Room, timeout time.Duration) bool {
+
+	//log.Debug("玩家行动时间: %v", time.Now().Format("2006-01-02 15:04:05"))
+
+	p.IsAction = true
+
+	after := time.NewTicker(timeout)
+
+	var nowAct = false
+	go func() {
+		for {
+			time.Sleep(time.Millisecond * 50)
+			if nowAct == true {
+				return
+			}
+			p.timerCount += 0.05
+			data := &msg.SendActTimer_S2C{}
+			data.ActChair = p.chair
+			data.Timer = p.timerCount
+			r.Broadcast(data)
+		}
+	}()
+
+	// 机器人开始下注
+	if p.IsRobot == true {
+		p.RobotDownBet(r)
+	}
+
+	var IsRaised bool
+
+	for {
+		select {
+		case x := <-p.action:
+			switch x {
+			case msg.ActionStatus_RAISE:
+				p.actStatus = msg.ActionStatus_RAISE
+				p.chips -= p.downBets
+				r.potMoney += p.downBets
+				IsRaised = true
+			case msg.ActionStatus_CALL:
+				p.actStatus = msg.ActionStatus_CALL
+				p.chips -= p.downBets
+				r.potMoney += p.downBets
+			case msg.ActionStatus_CHECK:
+				p.actStatus = msg.ActionStatus_CHECK
+			case msg.ActionStatus_FOLD:
+				p.actStatus = msg.ActionStatus_FOLD
+				p.gameStep = emNotGaming
+				r.remain--
+			case msg.ActionStatus_ALLIN:
+				p.actStatus = msg.ActionStatus_ALLIN
+				p.chips -= p.downBets
+				r.potMoney += p.downBets
+			}
+
+			nowAct = true
+
+			if p.lunDownBets >= r.preChips {
+				r.preChips = p.lunDownBets
+			}
+
+			r.Chips[p.chair] += p.chips
+
+			if p.chips == 0 {
+				p.actStatus = msg.ActionStatus_ALLIN
+				p.IsAllIn = true
+				r.allin++
+				r.IsHaveAllin = true
+			}
+			//玩家本局下注的总筹码数
+			//r.Chips[p.chair] += uint32(r.preChips)
+			return IsRaised
+
+
+		case <-after.C:
+			log.Debug("超时行动弃牌: %v", time.Now().Format("2006-01-02 15:04:05"))
+
+			nowAct = true
+			//ErrorResp(p.ConnAgent, msg.ErrorMsg_UserTimeOutFoldCard, "玩家超时弃牌")
+
+			p.gameStep = emNotGaming
+			p.actStatus = msg.ActionStatus_FOLD
+			p.IsTimeOutFold = true
+			r.remain--
+			return IsRaised
+		}
+	}
+}
